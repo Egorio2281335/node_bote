@@ -1497,7 +1497,6 @@ class UniversalSearchBot {
                 '.serp-item',
                 '.organic',
                 '.main__content .serp-item',
-                '.serp-adv',
                 '[data-fast="organic"]'
             ];
 
