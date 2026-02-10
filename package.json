@@ -1,0 +1,20 @@
+{
+  "name": "yandex-search-bot",
+  "version": "1.0.0",
+  "description": "Бот для нагула профиля и поиска организаций в Яндекс",
+  "main": "index_v1.js",
+  "scripts": {
+    "start": "node index_v1.js",
+    "dev": "node index_v1.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "fingerprint-injector": "^2.1.80",
+    "level": "^10.0.0",
+    "puppeteer": "^21.11.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "puppeteer-real-browser": "^1.4.4",
+    "sqlite3": "^5.1.7"
+  }
+}

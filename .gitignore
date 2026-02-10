@@ -1,0 +1,6 @@
+node_modules/
+unified_profiles/
+chrome_profiles/
+chrome_profiles*/
+profile_cache/
+search_results*.json
