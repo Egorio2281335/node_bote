@@ -113,7 +113,33 @@ class UniversalSearchBot {
         this.retryConfig = {
             maxAttempts: 3,
             baseDelay: 5000,
-            maxDelay: 30000
+            maxDelay: 30000,
+            // Конфигурация для разных типов сборов
+            yandexCard: {
+                maxAttempts: 3,
+                baseDelay: 5000,
+                maxDelay: 20000
+            },
+            yandexClinic: {
+                maxAttempts: 3,
+                baseDelay: 5000,
+                maxDelay: 20000
+            },
+            gisCollection: {
+                maxAttempts: 2,
+                baseDelay: 8000,
+                maxDelay: 25000
+            },
+            zoonCollection: {
+                maxAttempts: 2,
+                baseDelay: 8000,
+                maxDelay: 25000
+            },
+            pageNavigation: {
+                maxAttempts: 2,
+                baseDelay: 3000,
+                maxDelay: 10000
+            }
         };
         this.browser = null;
         this.page = null;
@@ -727,6 +753,63 @@ class UniversalSearchBot {
         }
     }
 
+    async executeWithRetry(operationName, operationFunction, config = null) {
+        const retryConfig = config || this.retryConfig;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= retryConfig.maxAttempts; attempt++) {
+            try {
+                console.log(`🔄 ${operationName} (попытка ${attempt}/${retryConfig.maxAttempts})...`);
+
+                if (attempt > 1) {
+                    // Увеличиваем задержку с каждым ретраем
+                    const delay = Math.min(
+                        retryConfig.baseDelay * Math.pow(1.5, attempt - 1),
+                        retryConfig.maxDelay
+                    );
+                    console.log(`⏸️ Пауза перед повторной попыткой: ${Math.round(delay / 1000)} сек.`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+
+                // Выполняем операцию
+                const result = await operationFunction();
+
+                if (attempt > 1) {
+                    console.log(`✅ ${operationName} успешно выполнен после ${attempt} попыток`);
+                }
+
+                return result;
+
+            } catch (error) {
+                lastError = error;
+                console.log(`❌ Ошибка при ${operationName} (попытка ${attempt}): ${error.message}`);
+
+                // Проверяем на капчу и пытаемся решить
+                if (error.message.toLowerCase().includes('captcha') ||
+                    error.message.toLowerCase().includes('капч')) {
+                    console.log('🔍 Обнаружена капча, пытаемся решить...');
+                    await this.handleCaptcha('yandex');
+                }
+
+                // Если это последняя попытка, пробуем восстановить состояние
+                if (attempt === retryConfig.maxAttempts) {
+                    console.log(`⚠️ ${operationName} не удалось после всех попыток`);
+
+                    // Пробуем перезагрузить страницу
+                    try {
+                        console.log('🔄 Пробуем перезагрузить страницу...');
+                        await this.page.reload();
+                        await this.delayByType('medium');
+                    } catch (reloadError) {
+                        console.log('⚠️ Не удалось перезагрузить страницу');
+                    }
+                }
+            }
+        }
+
+        throw lastError || new Error(`${operationName} не удался после ${retryConfig.maxAttempts} попыток`);
+    }
+
     async executeWarmupQuery(query, iteration) {
         console.log(`📊 [${iteration}/${this.profileWarmupCount}] Выполняем запрос...`);
         console.log(`   Поиск: "${query}"`);
@@ -968,7 +1051,7 @@ class UniversalSearchBot {
                 await this.page.keyboard.press('Enter');
 
                 console.log('⏳ Ждем результаты поиска...');
-                
+
                 await this.delayByType('small');
 
                 if (await this.checkForCaptcha('yandex')) {
@@ -1011,8 +1094,8 @@ class UniversalSearchBot {
                 console.log('✅ Целевой поиск в Яндекс выполнен\n');
 
                 console.log('🔍 Ищем клинику в Яндекс...');
-                const resultCard = await this.findTargetCardYandex();
-                this.results.card = resultCard;
+                const result = await this.findTargetClinicYandex();
+                this.results.yandex = result;
 
                 if (await this.checkForCaptcha('yandex')) {
                     console.log(`🚫 Капча при загрузке 'yandex'`);
@@ -1030,8 +1113,8 @@ class UniversalSearchBot {
                     }
                 }
 
-                const result = await this.findTargetClinicYandex();
-                this.results.yandex = result;
+                const resultCard = await this.findTargetCardYandex();
+                this.results.card = resultCard;
 
                 await this.closeBrowser();
 
@@ -1252,157 +1335,199 @@ class UniversalSearchBot {
     async findTargetCardYandex() {
         console.log(`\n🔍 Ищем сайты 2gis.ru и zoon.ru в Яндекс:`);
 
-        let totalChecked = 0;
-        let reloadAttempts = 0;
-        const maxReloadAttempts = 3;
-        let gisCount = 0;
-        let zoonCount = 0;
-        let searchCompleted = false;
+        const result = await this.executeWithRetry(
+            'Поиск карточек в Яндекс',
+            async () => {
+                let totalChecked = 0;
+                let reloadAttempts = 0;
+                const maxReloadAttempts = 3;
+                let gisCount = 0;
+                let zoonCount = 0;
+                let searchCompleted = false;
 
-        try {
-            await this.delayByType('small');
-            // Проверка на капчу
-            if (await this.checkForCaptcha('yandex')) {
-                console.log(`🚫 Обнаружена капча, пытаемся решить...`);
-                const captchaSolved = await this.handleCaptcha('yandex');
-
-                if (!captchaSolved) {
-                    console.log(`⚠️ Капча не решена`);
-                    await this.closeBrowser();
-                }
-            }
-
-            console.log('🔍 Ищем кнопку "Показать ещё"...');
-
-            const showMoreXPath = '.main__content-footer .Pager-More';
-            let showMoreElement = await this.page.$(showMoreXPath);
-            let showMoreClicked = false;
-
-            if (showMoreElement) {
-                console.log('✅ Найдена кнопка "Показать ещё"');
-            } else {
-                console.log('❌ Кнопка "Показать ещё" не найдена, возможно нет дополнительных результатов');
-            }
-
-            // Пытаемся нажать кнопку "Показать ещё" несколько раз
-            let maxShowMoreClicks = 4;
-            let clicksCount = 0;
-
-            while (showMoreElement && clicksCount < maxShowMoreClicks && !searchCompleted) {
                 try {
-                    console.log(`🖱️ Нажимаем кнопку "Показать ещё" (клик ${clicksCount + 1}/${maxShowMoreClicks})...`);
-
-                    // Прокручиваем к кнопке
-                    //await this.smoothScrollToElement(showMoreElement, 150);
-                    await this.smoothScrollToElement(showMoreXPath, 150);
-
-                    // Сохраняем текущее количество результатов перед кликом
-                    const beforeClickCount = await this.getCurrentResultsCount();
-
-                    // Кликаем
-                    await showMoreElement.click();
-                    showMoreClicked = true;
-                    clicksCount++;
-
                     await this.delayByType('small');
-                    if (await this.checkForCaptcha('yandex')) {
-                        console.log(`🚫 Капча при загрузке 'yandex'`);
-                        const captchaSolved = await this.handleCaptcha('yandex');
+
+                    // Проверка на капчу с ретраем
+                    const hasCaptcha = await this.executeWithRetry(
+                        'Проверка на капчу',
+                        async () => await this.checkForCaptcha('yandex'),
+                        this.retryConfig.pageNavigation
+                    );
+
+                    if (hasCaptcha) {
+                        console.log(`🚫 Обнаружена капча, пытаемся решить...`);
+                        const captchaSolved = await this.executeWithRetry(
+                            'Решение капчи',
+                            async () => await this.handleCaptcha('yandex'),
+                            this.retryConfig.pageNavigation
+                        );
 
                         if (!captchaSolved) {
-                            await this.closeBrowser();
-
-                            if (attempt < this.retryConfig.maxAttempts) {
-                                const delay = Math.min(this.retryConfig.baseDelay * Math.pow(2, attempt - 1), this.retryConfig.maxDelay);
-                                console.log(`⏸️ Пауза перед повторной попыткой: ${Math.round(delay / 1000)} сек.`);
-                                await new Promise(resolve => setTimeout(resolve, delay));
-                            }
-                            continue;
+                            console.log(`⚠️ Капча не решена`);
+                            throw new Error('Не удалось решить капчу');
                         }
                     }
 
-                    console.log('⏳ Ждем загрузки дополнительных результатов...');
+                    console.log('🔍 Ищем кнопку "Показать ещё"...');
 
-                    // Ждем появления новых результатов
-                    const newResultsLoaded = await this.waitForNewResults(beforeClickCount);
-
-                    if (!newResultsLoaded) {
-                        console.log('⚠️ Новые результаты не загрузились, возможно кнопка не работает');
-                        break;
-                    }
-
-                    // Проверяем на капчу после клика
-                    if (await this.checkForCaptcha('yandex')) {
-                        console.log(`🚫 Капча после клика, пробуем решить...`);
-                        const captchaSolved = await this.handleCaptcha('yandex');
-
-                        if (!captchaSolved) {
-                            console.log(`⚠️ Капча не решена, продолжаем поиск без дополнительной загрузки`);
-                            break;
-                        }
-                    }
-
-                    // Проверяем текущие результаты
-                    const sitesFound = await this.checkCurrentResultsForSitesLocal(gisCount, zoonCount);
-                    if (sitesFound.gisCount > 0) gisCount = sitesFound.gisCount;
-                    if (sitesFound.zoonCount > 0) zoonCount = sitesFound.zoonCount;
-
-                    // Если оба сайта найдены, прерываем цикл
-                    if (gisCount !== 0 && zoonCount !== 0) {
-                        console.log('✅ Оба сайта найдены, прекращаем загрузку дополнительных результатов');
-                        searchCompleted = true;
-                        break;
-                    }
-
-                    // Ищем кнопку снова
-                    showMoreElement = await this.page.$(showMoreXPath);
+                    const showMoreXPath = '.main__content-footer .Pager-More';
+                    let showMoreElement = await this.page.$(showMoreXPath);
 
                     if (showMoreElement) {
-                        console.log('✅ Кнопка "Показать ещё" все еще присутствует');
+                        console.log('✅ Найдена кнопка "Показать ещё"');
                     } else {
-                        console.log('✅ Больше нет кнопки "Показать ещё"');
-                        break;
+                        console.log('❌ Кнопка "Показать ещё" не найдена, возможно нет дополнительных результатов');
                     }
 
+                    // Пытаемся нажать кнопку "Показать ещё" несколько раз с ретраем
+                    let maxShowMoreClicks = 4;
+                    let clicksCount = 0;
+
+                    while (showMoreElement && clicksCount < maxShowMoreClicks && !searchCompleted) {
+                        try {
+                            console.log(`🖱️ Нажимаем кнопку "Показать ещё" (клик ${clicksCount + 1}/${maxShowMoreClicks})...`);
+
+                            // Прокручиваем к кнопке с ретраем
+                            await this.executeWithRetry(
+                                'Прокрутка к кнопке',
+                                async () => await this.smoothScrollToElement(showMoreXPath, 150),
+                                this.retryConfig.pageNavigation
+                            );
+
+                            // Сохраняем текущее количество результатов перед кликом
+                            const beforeClickCount = await this.getCurrentResultsCount();
+
+                            // Кликаем с ретраем
+                            await this.executeWithRetry(
+                                'Клик по кнопке "Показать ещё"',
+                                async () => {
+                                    await showMoreElement.click();
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
+
+                            clicksCount++;
+
+                            await this.delayByType('small');
+
+                            // Проверяем на капчу после клика с ретраем
+                            const captchaAfterClick = await this.executeWithRetry(
+                                'Проверка капчи после клика',
+                                async () => await this.checkForCaptcha('yandex'),
+                                this.retryConfig.pageNavigation
+                            );
+
+                            if (captchaAfterClick) {
+                                console.log(`🚫 Капча после клика, пытаемся решить...`);
+                                const captchaSolved = await this.executeWithRetry(
+                                    'Решение капчи после клика',
+                                    async () => await this.handleCaptcha('yandex'),
+                                    this.retryConfig.pageNavigation
+                                );
+
+                                if (!captchaSolved) {
+                                    console.log(`⚠️ Капча не решена, продолжаем поиск без дополнительной загрузки`);
+                                    break;
+                                }
+                            }
+
+                            console.log('⏳ Ждем загрузки дополнительных результатов...');
+
+                            // Ждем появления новых результатов с ретраем
+                            const newResultsLoaded = await this.executeWithRetry(
+                                'Ожидание новых результатов',
+                                async () => await this.waitForNewResults(beforeClickCount, 15000),
+                                this.retryConfig.pageNavigation
+                            );
+
+                            if (!newResultsLoaded) {
+                                console.log('⚠️ Новые результаты не загрузились, возможно кнопка не работает');
+                                break;
+                            }
+
+                            // Проверяем текущие результаты с ретраем
+                            const sitesFound = await this.executeWithRetry(
+                                'Проверка результатов поиска',
+                                async () => await this.checkCurrentResultsForSitesLocal(gisCount, zoonCount),
+                                this.retryConfig.yandexCard
+                            );
+
+                            if (sitesFound.gisCount > 0) gisCount = sitesFound.gisCount;
+                            if (sitesFound.zoonCount > 0) zoonCount = sitesFound.zoonCount;
+
+                            // Если оба сайта найдены, прерываем цикл
+                            if (gisCount !== 0 && zoonCount !== 0) {
+                                console.log('✅ Оба сайта найдены, прекращаем загрузку дополнительных результатов');
+                                searchCompleted = true;
+                                break;
+                            }
+
+                            // Ищем кнопку снова
+                            showMoreElement = await this.page.$(showMoreXPath);
+
+                            if (showMoreElement) {
+                                console.log('✅ Кнопка "Показать ещё" все еще присутствует');
+                            } else {
+                                console.log('✅ Больше нет кнопки "Показать ещё"');
+                                break;
+                            }
+
+                        } catch (error) {
+                            console.log(`⚠️ Ошибка при нажатии кнопки "Показать ещё": ${error.message}`);
+
+                            // Пробуем найти кнопку заново
+                            showMoreElement = await this.page.$(showMoreXPath);
+                            if (!showMoreElement) {
+                                break;
+                            }
+                        }
+                    }
+
+                    if (clicksCount > 0) {
+                        console.log(`✅ Нажато кнопок "Показать ещё": ${clicksCount}`);
+                    }
+
+                    // Если поиск еще не завершен, проверяем все результаты с ретраем
+                    if (!searchCompleted) {
+                        console.log('🔍 Проверяем все результаты поиска...');
+                        const sitesFound = await this.executeWithRetry(
+                            'Финальная проверка результатов',
+                            async () => await this.checkCurrentResultsForSitesLocal(gisCount, zoonCount),
+                            this.retryConfig.yandexCard
+                        );
+
+                        if (sitesFound.gisCount > 0) gisCount = sitesFound.gisCount;
+                        if (sitesFound.zoonCount > 0) zoonCount = sitesFound.zoonCount;
+                    }
+
+                    console.log('\n📊 ИТОГИ ПОИСКА В ЯНДЕКС:');
+                    console.log(`   2gis.ru: ${gisCount > 0 ? `позиция ${gisCount}` : 'не найден'}`);
+                    console.log(`   zoon.ru: ${zoonCount > 0 ? `позиция ${zoonCount}` : 'не найден'}`);
+
+                    return {
+                        zoonCount: zoonCount,
+                        gisCount: gisCount,
+                        searchCompleted: searchCompleted,
+                        success: true
+                    };
+
                 } catch (error) {
-                    console.log(`⚠️ Ошибка при нажатии кнопки "Показать ещё": ${error.message}`);
-                    break;
+                    console.log(`❌ Критическая ошибка при поиске в Яндекс: ${error.message}`);
+                    return {
+                        zoonCount: 0,
+                        gisCount: 0,
+                        searchCompleted: false,
+                        success: false,
+                        error: error.message
+                    };
                 }
-            }
+            },
+            this.retryConfig.yandexCard
+        );
 
-            if (showMoreClicked) {
-                console.log(`✅ Нажато кнопок "Показать ещё": ${clicksCount}`);
-            }
-
-            // Если поиск еще не завершен, проверяем все результаты
-            if (!searchCompleted) {
-                console.log('🔍 Проверяем все результаты поиска...');
-                const sitesFound = await this.checkCurrentResultsForSitesLocal(gisCount, zoonCount);
-                if (sitesFound.gisCount > 0) gisCount = sitesFound.gisCount;
-                if (sitesFound.zoonCount > 0) zoonCount = sitesFound.zoonCount;
-            }
-
-            console.log('\n📊 ИТОГИ ПОИСКА В ЯНДЕКС:');
-            console.log(`   2gis.ru: ${gisCount > 0 ? `позиция ${gisCount}` : 'не найден'}`);
-            console.log(`   zoon.ru: ${zoonCount > 0 ? `позиция ${zoonCount}` : 'не найден'}`);
-
-            return {
-                zoonCount: zoonCount,
-                gisCount: gisCount,
-                searchCompleted: searchCompleted,
-                success: true
-            };
-
-        } catch (error) {
-            console.log(`❌ Критическая ошибка при поиске в Яндекс: ${error.message}`);
-            return {
-                zoonCount: zoonCount,
-                gisCount: gisCount,
-                searchCompleted: searchCompleted,
-                success: false,
-                error: error.message
-            };
-        }
+        return result;
     }
 
     // Вспомогательный метод для проверки результатов с передачей локальных переменных
@@ -1558,410 +1683,539 @@ class UniversalSearchBot {
     async findTargetClinicYandex() {
         console.log(`\n🔍 Ищем клинику в Яндекс:`);
 
-        let foundClinics = [];
-        let totalChecked = 0;
-        let reloadAttempts = 0;
-        const maxReloadAttempts = 3;
-
-        try {
-            if (await this.checkForCaptcha('yandex')) {
-                console.log(`🚫 Капча при загрузке 'yandex'`);
-                const captchaSolved = await this.handleCaptcha('yandex');
-
-                if (!captchaSolved) {
-                    if (this.browser && !this.browser.isConnected()) {
-                        await this.closeBrowser();
-                    }
-
-                    if (attempt < this.retryConfig.maxAttempts) {
-                        const delay = Math.min(this.retryConfig.baseDelay * Math.pow(2, attempt - 1), this.retryConfig.maxDelay);
-                        console.log(`⏸️ Пауза перед повторной попыткой: ${Math.round(delay / 1000)} сек.`);
-                        await new Promise(resolve => setTimeout(resolve, delay));
-                    }
-                }
-            }
-
-            console.log('🔍 Ищем кнопку "Показать ещё"...');
-
-            const showMoreXPath = '.OrgsList-More';
-            let showMoreElement = await this.page.$(showMoreXPath);
-            let showMoreClicked = false;
-
-            if (showMoreElement) {
-                console.log('✅ Найдена кнопка "Показать ещё"');
+        return await this.executeWithRetry(
+            'Поиск клиники в Яндекс',
+            async () => {
+                let foundClinics = [];
+                let totalChecked = 0;
+                let reloadAttempts = 0;
+                const maxReloadAttempts = 3;
 
                 try {
-                    const buttonText = await showMoreElement.evaluate(el => el.textContent?.trim());
-                    console.log(`Текст кнопки: "${buttonText}"`);
-                } catch (e) {
-                }
-            } else {
-                console.log('❌ Кнопка "Показать ещё" не найдена');
-            }
+                    // Проверка на капчу с ретраем
+                    const hasCaptcha = await this.executeWithRetry(
+                        'Проверка капчи перед поиском',
+                        async () => await this.checkForCaptcha('yandex'),
+                        this.retryConfig.pageNavigation
+                    );
 
-            while (showMoreElement) {
-                try {
-                    console.log('🖱️ Нажимаем кнопку "Показать ещё"...');
-                    await this.delayByType('small');
+                    if (hasCaptcha) {
+                        console.log(`🚫 Обнаружена капча, пытаемся решить...`);
+                        const captchaSolved = await this.executeWithRetry(
+                            'Решение капчи',
+                            async () => await this.handleCaptcha('yandex'),
+                            this.retryConfig.pageNavigation
+                        );
 
-                    await showMoreElement.scrollIntoView();
+                        if (!captchaSolved) {
+                            throw new Error('Не удалось решить капчу');
+                        }
+                    }
 
-                    await showMoreElement.click();
-                    showMoreClicked = true;
+                    console.log('🔍 Ищем кнопку "Показать ещё"...');
 
-                    console.log('⏳ Ждем загрузки дополнительных карточек...');
-
-                    showMoreElement = await this.page.$(showMoreXPath);
+                    const showMoreXPath = '.OrgsList-More';
+                    let showMoreElement = await this.page.$(showMoreXPath);
+                    let showMoreClicked = false;
 
                     if (showMoreElement) {
-                        console.log('✅ Кнопка "Показать ещё" все еще присутствует, продолжаем...');
+                        console.log('✅ Найдена кнопка "Показать ещё"');
 
                         try {
                             const buttonText = await showMoreElement.evaluate(el => el.textContent?.trim());
                             console.log(`Текст кнопки: "${buttonText}"`);
                         } catch (e) {
+                            // Игнорируем ошибку получения текста
                         }
                     } else {
-                        console.log('✅ Больше нет кнопки "Показать ещё"');
+                        console.log('❌ Кнопка "Показать ещё" не найдена');
                     }
 
-                } catch (error) {
-                    console.log(`⚠️ Не удалось нажать кнопку "Показать ещё": ${error.message}`);
+                    // Нажимаем кнопки с ретраями
+                    while (showMoreElement) {
+                        try {
+                            console.log('🖱️ Нажимаем кнопку "Показать ещё"...');
+                            await this.delayByType('small');
 
-                    try {
-                        const isDisabled = await showMoreElement.evaluate(el =>
-                            el.disabled || el.getAttribute('aria-disabled') === 'true'
-                        );
+                            await this.executeWithRetry(
+                                'Прокрутка к кнопке',
+                                async () => {
+                                    await showMoreElement.scrollIntoView();
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
 
-                        if (isDisabled) {
-                            console.log('ℹ️ Кнопка "Показать ещё" недоступна (disabled)');
+                            await this.executeWithRetry(
+                                'Клик по кнопке',
+                                async () => {
+                                    await showMoreElement.click();
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
+
+                            showMoreClicked = true;
+
+                            console.log('⏳ Ждем загрузки дополнительных карточек...');
+                            await this.delayByType('medium');
+
+                            // Проверяем на капчу после клика
+                            const captchaAfterClick = await this.executeWithRetry(
+                                'Проверка капчи после клика',
+                                async () => await this.checkForCaptcha('yandex'),
+                                this.retryConfig.pageNavigation
+                            );
+
+                            if (captchaAfterClick) {
+                                console.log(`🚫 Капча после клика, пробуем решить...`);
+                                await this.handleCaptcha('yandex');
+                            }
+
+                            // Ищем кнопку снова
+                            showMoreElement = await this.page.$(showMoreXPath);
+
+                            if (showMoreElement) {
+                                console.log('✅ Кнопка "Показать ещё" все еще присутствует');
+                            } else {
+                                console.log('✅ Больше нет кнопки "Показать ещё"');
+                                break;
+                            }
+
+                        } catch (error) {
+                            console.log(`⚠️ Не удалось нажать кнопку "Показать ещё": ${error.message}`);
                             break;
                         }
-                    } catch (e) {
                     }
 
-                    break;
-                }
-            }
+                    if (showMoreClicked) {
+                        console.log('✅ Нажатие кнопки "Показать ещё" завершено');
+                    }
 
-            if (showMoreClicked) {
-                console.log('✅ Нажатие кнопки "Показать ещё" завершено');
-            }
+                    console.log('⏳ Ждем загрузки карточек организаций...');
 
-            console.log('⏳ Ждем загрузки карточек организаций...');
+                    let cardsLoaded = false;
+                    let currentCards = [];
 
-            let cardsLoaded = false;
-            let currentCards = [];
+                    // Загрузка карточек с ретраями
+                    while (reloadAttempts < maxReloadAttempts) {
+                        try {
+                            await this.executeWithRetry(
+                                'Ожидание карточек организаций',
+                                async () => {
+                                    await this.page.waitForSelector('.OrgsList-Item', { timeout: 20000 });
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
 
-            while (reloadAttempts < maxReloadAttempts) {
-                try {
-                    await this.page.waitForSelector('.OrgsList-Item', { timeout: 20000 });
-                    currentCards = await this.page.$$('.OrgsList-Item');
+                            currentCards = await this.page.$$('.OrgsList-Item');
 
-                    if (currentCards.length > 0) {
-                        console.log(`📋 Карточек загружено: ${currentCards.length}`);
-                        cardsLoaded = true;
-                        break;
-                    } else {
-                        reloadAttempts++;
-                        if (reloadAttempts < maxReloadAttempts) {
-                            console.log(`🔄 Перезагружаем страницу (попытка ${reloadAttempts}/${maxReloadAttempts})...`);
-                            await this.page.reload();
+                            if (currentCards.length > 0) {
+                                console.log(`📋 Карточек загружено: ${currentCards.length}`);
+                                cardsLoaded = true;
+                                break;
+                            } else {
+                                reloadAttempts++;
+                                if (reloadAttempts < maxReloadAttempts) {
+                                    console.log(`🔄 Перезагружаем страницу (попытка ${reloadAttempts}/${maxReloadAttempts})...`);
 
-                            showMoreElement = await this.page.$(showMoreXPath);
-                            if (showMoreElement) {
-                                try {
-                                    console.log('🔄 После перезагрузки снова нажимаем "Показать ещё"...');
-                                    await showMoreElement.click();
-                                } catch (e) {
-                                    console.log('⚠️ Не удалось нажать кнопку после перезагрузки');
+                                    await this.executeWithRetry(
+                                        'Перезагрузка страницы',
+                                        async () => {
+                                            await this.page.reload();
+                                            return true;
+                                        },
+                                        this.retryConfig.pageNavigation
+                                    );
+
+                                    showMoreElement = await this.page.$(showMoreXPath);
+                                    if (showMoreElement) {
+                                        try {
+                                            console.log('🔄 После перезагрузки снова нажимаем "Показать ещё"...');
+                                            await this.executeWithRetry(
+                                                'Повторный клик по кнопке',
+                                                async () => {
+                                                    await showMoreElement.click();
+                                                    return true;
+                                                },
+                                                this.retryConfig.pageNavigation
+                                            );
+                                        } catch (e) {
+                                            console.log('⚠️ Не удалось нажать кнопку после перезагрузки');
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            reloadAttempts++;
+                            if (reloadAttempts < maxReloadAttempts) {
+                                console.log(`🔄 Перезагружаем страницу (попытка ${reloadAttempts}/${maxReloadAttempts})...`);
+
+                                await this.executeWithRetry(
+                                    'Перезагрузка страницы при ошибке',
+                                    async () => {
+                                        await this.page.reload();
+                                        return true;
+                                    },
+                                    this.retryConfig.pageNavigation
+                                );
+
+                                showMoreElement = await this.page.$(showMoreXPath);
+                                if (showMoreElement) {
+                                    try {
+                                        console.log('🔄 После перезагрузки снова нажимаем "Показать ещё"...');
+                                        await this.executeWithRetry(
+                                            'Повторный клик после перезагрузки',
+                                            async () => {
+                                                await showMoreElement.click();
+                                                return true;
+                                            },
+                                            this.retryConfig.pageNavigation
+                                        );
+                                    } catch (e) {
+                                        console.log('⚠️ Не удалось нажать кнопку после перезагрузки');
+                                    }
                                 }
                             }
                         }
                     }
-                } catch (error) {
-                    reloadAttempts++;
-                    if (reloadAttempts < maxReloadAttempts) {
-                        console.log(`🔄 Перезагружаем страницу (попытка ${reloadAttempts}/${maxReloadAttempts})...`);
-                        await this.page.reload();
 
-                        showMoreElement = await this.page.$(showMoreXPath);
-                        if (showMoreElement) {
-                            try {
-                                console.log('🔄 После перезагрузки снова нажимаем "Показать ещё"...');
-                                await showMoreElement.click();
-                            } catch (e) {
-                                console.log('⚠️ Не удалось нажать кнопку после перезагрузки');
+                    if (!cardsLoaded || currentCards.length === 0) {
+                        console.log('❌ Не удалось загрузить карточки организаций после перезагрузок');
+                        throw new Error('Не удалось загрузить карточки организаций');
+                    }
+
+                    console.log('🔍 Проверяем карточки на наличие целевых клиник...');
+
+                    // Парсинг карточек с ретраем
+                    for (let i = 0; i < currentCards.length; i++) {
+                        try {
+                            const card = currentCards[i];
+                            totalChecked++;
+
+                            const cardData = await this.executeWithRetry(
+                                `Парсинг карточки ${i + 1}`,
+                                async () => {
+                                    const titleElement = await card.$('.OrgMinibadge-TitleText');
+                                    const title = titleElement ?
+                                        await this.page.evaluate(el => el.textContent?.trim(), titleElement) : '';
+
+                                    const addressElement = await card.$('.OrgMinibadge-Address');
+                                    const address = addressElement ?
+                                        await this.page.evaluate(el => el.textContent?.trim(), addressElement) : '';
+
+                                    return { title, address };
+                                },
+                                { maxAttempts: 2, baseDelay: 1000, maxDelay: 5000 }
+                            );
+
+                            const foundClinic = {
+                                fullTitle: cardData.title,
+                                address: cardData.address,
+                            };
+
+                            foundClinics.push(foundClinic);
+
+                            if (i < 5 && cardData.title) {
+                                console.log(`   [${i + 1}] ${cardData.title.substring(0, 50)}...`);
                             }
+
+                        } catch (error) {
+                            console.log(`   ⚠️ Ошибка при проверке карточки ${i + 1}: ${error.message}`);
+                            // Продолжаем со следующей карточкой
+                            continue;
                         }
                     }
-                }
-            }
 
-            if (!cardsLoaded || currentCards.length === 0) {
-                console.log('❌ Не удалось загрузить карточки организаций после перезагрузок');
-                return {
-                    found: false,
-                    foundClinics: [],
-                    totalChecked: 0
-                };
-            }
+                    foundClinics.sort((a, b) => a.position - b.position);
 
-            console.log('🔍 Проверяем карточки на наличие целевых клиник...');
-
-            for (let i = 0; i < currentCards.length; i++) {
-                try {
-                    const card = currentCards[i];
-                    totalChecked++;
-
-                    const titleElement = await card.$('.OrgMinibadge-TitleText');
-                    const title = titleElement ?
-                        await this.page.evaluate(el => el.textContent?.trim(), titleElement) : '';
-
-                    const addressElement = await card.$('.OrgMinibadge-Address');
-                    const address = addressElement ?
-                        await this.page.evaluate(el => el.textContent?.trim(), addressElement) : '';
-
-                    const foundClinic = {
-                        fullTitle: title,
-                        address: address,
-                    };
-
-                    foundClinics.push(foundClinic);
-                    console.log(`\n🎯 НАЙДЕНО в Яндекс!`);
-                    console.log(`   Клиника: ${foundClinic.fullTitle}`);
-                    console.log(`   Адрес: ${foundClinic.address}`);
-
-                    if (i < 5 && title) {
-                        console.log(`   [${i + 1}] ${title.substring(0, 50)}...`);
+                    if (foundClinics.length > 0) {
+                        console.log(`\n🎯 НАЙДЕНО в Яндекс! Всего клиник: ${foundClinics.length}`);
+                        console.log(`🔍 Проверено карточек: ${totalChecked}`);
                     }
 
+                    return {
+                        found: foundClinics.length > 0,
+                        foundClinics: foundClinics,
+                        totalChecked: totalChecked
+                    };
+
                 } catch (error) {
-                    console.log(`   ⚠️ Ошибка при проверке карточки ${i + 1}: ${error.message}`);
+                    console.log(`❌ Ошибка при поиске клиники в Яндекс: ${error.message}`);
+                    return {
+                        found: false,
+                        foundClinics: [],
+                        totalChecked: totalChecked
+                    };
                 }
-            }
-
-            foundClinics.sort((a, b) => a.position - b.position);
-
-
-
-            return {
-                found: foundClinics.length > 0,
-                foundClinics: foundClinics,
-                totalChecked: totalChecked
-            };
-
-        } catch (error) {
-            console.log(`❌ Ошибка при поиске клиники в Яндекс: ${error.message}`);
-            return {
-                found: false,
-                foundClinics: [],
-                totalChecked: totalChecked
-            };
-        }
+            },
+            this.retryConfig.yandexClinic
+        );
     }
 
     async findTargetClinic2GIS() {
         console.log(`\n🔍 Собираем ВСЕ организации из 2GIS (все страницы)...`);
 
-        let allOrganizations = [];
-        let currentPage = 1;
-        let globalPosition = 1;
-        let hasMorePages = true;
-
-        try {
-            while (hasMorePages) {
-                console.log(`\n📄 Страница ${currentPage}:`);
-                console.log('-'.repeat(30));
-
-                await this.delayByType('small');
-
-                console.log('🔍 Ищем карточки организаций...');
+        return await this.executeWithRetry(
+            'Сбор организаций из 2GIS',
+            async () => {
+                let allOrganizations = [];
+                let currentPage = 1;
+                let globalPosition = 1;
+                let hasMorePages = true;
 
                 try {
-                    await this.page.waitForSelector(this.selectors.gis.companyCards, {
-                        timeout: currentPage === 1 ? 15000 : 20000
-                    });
-                } catch (error) {
-                    console.log('⚠️ Не удалось найти карточки организаций');
+                    while (hasMorePages) {
+                        console.log(`\n📄 Страница ${currentPage}:`);
+                        console.log('-'.repeat(30));
 
-                    if (currentPage === 1) {
-                        console.log('🔄 Перезагружаем страницу...');
-                        await this.page.reload();
-                        continue;
-                    } else {
-                        console.log('ℹ️ Возможно, это последняя страница');
-                        break;
-                    }
-                }
+                        await this.delayByType('small');
 
-                const cards = await this.page.$$(this.selectors.gis.companyCards);
-                console.log(`📋 Найдено карточек: ${cards.length}`);
+                        console.log('🔍 Ищем карточки организаций...');
 
-                if (cards.length === 0) {
-                    console.log('ℹ️ На странице нет карточек, завершаем сбор');
-                    break;
-                }
+                        // Ожидание карточек с ретраем
+                        try {
+                            await this.executeWithRetry(
+                                `Ожидание карточек на странице ${currentPage}`,
+                                async () => {
+                                    await this.page.waitForSelector(this.selectors.gis.companyCards, {
+                                        timeout: currentPage === 1 ? 15000 : 20000
+                                    });
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
+                        } catch (error) {
+                            console.log('⚠️ Не удалось найти карточки организаций');
 
-                for (let i = 0; i < cards.length; i++) {
-                    try {
-                        const card = cards[i];
-
-                        let title = '';
-                        const titleElement = await card.$(this.selectors.gis.companyTitle);
-                        if (titleElement) {
-                            title = await this.page.evaluate(el => {
-                                const span = el.querySelector('span');
-                                return span ? span.textContent?.trim() : el.textContent?.trim();
-                            }, titleElement);
-                        }
-
-                        if (!title) {
-                            const cardText = await this.page.evaluate(el => el.textContent?.trim(), card);
-                            const titleMatch = cardText.match(/[А-Я][А-Яа-яё\s\d-]{2,50}(?=\s|$)/);
-                            if (titleMatch) {
-                                title = titleMatch[0].trim();
-                            } else if (cardText.length > 0) {
-                                title = cardText.substring(0, 50).trim();
+                            if (currentPage === 1) {
+                                console.log('🔄 Перезагружаем страницу...');
+                                await this.executeWithRetry(
+                                    'Перезагрузка страницы 2GIS',
+                                    async () => {
+                                        await this.page.reload();
+                                        return true;
+                                    },
+                                    this.retryConfig.pageNavigation
+                                );
+                                continue;
+                            } else {
+                                console.log('ℹ️ Возможно, это последняя страница');
+                                break;
                             }
                         }
 
-                        let address = '';
-                        const addressElement = await card.$(this.selectors.gis.companyAddress);
-                        if (addressElement) {
-                            address = await this.page.evaluate(el => {
-                                const text = el.textContent?.trim();
-                                return text;
-                            }, addressElement);
+                        const cards = await this.page.$$(this.selectors.gis.companyCards);
+                        console.log(`📋 Найдено карточек: ${cards.length}`);
+
+                        if (cards.length === 0) {
+                            console.log('ℹ️ На странице нет карточек, завершаем сбор');
+                            break;
                         }
 
-                        const organization = {
-                            title: title || 'Не указано',
-                            address: address || 'Не указан',
-                        };
+                        // Парсинг карточек с ретраем для каждой
+                        for (let i = 0; i < cards.length; i++) {
+                            try {
+                                const card = cards[i];
 
-                        allOrganizations.push(organization);
+                                const cardData = await this.executeWithRetry(
+                                    `Парсинг карточки ${i + 1} на странице ${currentPage}`,
+                                    async () => {
+                                        let title = '';
+                                        const titleElement = await card.$(this.selectors.gis.companyTitle);
+                                        if (titleElement) {
+                                            title = await this.page.evaluate(el => {
+                                                const span = el.querySelector('span');
+                                                return span ? span.textContent?.trim() : el.textContent?.trim();
+                                            }, titleElement);
+                                        }
 
-                        console.log(`      ${organization.title}`);
-                        if (address) console.log(`      📍 ${organization.address}`);
+                                        if (!title) {
+                                            const cardText = await this.page.evaluate(el => el.textContent?.trim(), card);
+                                            const titleMatch = cardText.match(/[А-Я][А-Яа-яё\s\d-]{2,50}(?=\s|$)/);
+                                            if (titleMatch) {
+                                                title = titleMatch[0].trim();
+                                            } else if (cardText.length > 0) {
+                                                title = cardText.substring(0, 50).trim();
+                                            }
+                                        }
 
-                    } catch (error) {
-                        console.log(`   ⚠️ Ошибка при парсинге карточки ${i + 1}: ${error.message}`);
+                                        let address = '';
+                                        const addressElement = await card.$(this.selectors.gis.companyAddress);
+                                        if (addressElement) {
+                                            address = await this.page.evaluate(el => {
+                                                const text = el.textContent?.trim();
+                                                return text;
+                                            }, addressElement);
+                                        }
 
-                        allOrganizations.push({
-                            title: 'Ошибка парсинга',
-                            address: 'Не удалось распарсить',
-                            error: error.message,
-                        });
+                                        return { title, address };
+                                    },
+                                    { maxAttempts: 2, baseDelay: 1000, maxDelay: 5000 }
+                                );
+
+                                const organization = {
+                                    title: cardData.title || 'Не указано',
+                                    address: cardData.address || 'Не указан',
+                                };
+
+                                allOrganizations.push(organization);
+
+                                console.log(`      ${organization.title}`);
+                                if (cardData.address) console.log(`      📍 ${organization.address}`);
+
+                            } catch (error) {
+                                console.log(`   ⚠️ Ошибка при парсинге карточки ${i + 1}: ${error.message}`);
+
+                                allOrganizations.push({
+                                    title: 'Ошибка парсинга',
+                                    address: 'Не удалось распарсить',
+                                    error: error.message,
+                                });
+                            }
+                        }
+
+                        console.log(`✅ Страница ${currentPage} обработана: ${cards.length} организаций`);
+
+                        console.log('🔍 Ищем кнопку перехода на следующую страницу...');
+
+                        // Переход на следующую страницу с ретраем
+                        const nextPageResult = await this.executeWithRetry(
+                            `Переход на следующую страницу 2GIS`,
+                            async () => await this.goToNextPage2GIS(currentPage),
+                            this.retryConfig.pageNavigation
+                        );
+
+                        hasMorePages = nextPageResult;
+
+                        if (hasMorePages) {
+                            currentPage++;
+                        } else {
+                            console.log(`🏁 Все страницы обработаны. Всего страниц: ${currentPage}`);
+                        }
+
+                        if (currentPage > 5) {
+                            console.log('⚠️ Достигнут лимит в 5 страниц, завершаем сбор');
+                            break;
+                        }
                     }
+
+                    console.log('\n' + '='.repeat(60));
+                    console.log('📊 СБОР ДАННЫХ ЗАВЕРШЕН');
+                    console.log('='.repeat(60));
+                    console.log(`📄 Всего страниц: ${currentPage}`);
+                    console.log(`🏢 Всего организаций: ${allOrganizations.length}`);
+
+                    return {
+                        success: true,
+                        organizations: allOrganizations,
+                        totalPages: currentPage,
+                        totalOrganizations: allOrganizations.length
+                    };
+
+                } catch (error) {
+                    console.log(`❌ Критическая ошибка при сборе данных из 2GIS: ${error.message}`);
+
+                    return {
+                        success: false,
+                        error: error.message,
+                        organizations: allOrganizations,
+                        totalPages: currentPage - 1,
+                        totalOrganizations: allOrganizations.length
+                    };
                 }
-
-                console.log(`✅ Страница ${currentPage} обработана: ${cards.length} организаций`);
-
-                console.log('🔍 Ищем кнопку перехода на следующую страницу...');
-                hasMorePages = await this.goToNextPage2GIS(currentPage);
-
-                if (hasMorePages) {
-                    currentPage++;
-                } else {
-                    console.log(`🏁 Все страницы обработаны. Всего страниц: ${currentPage}`);
-                }
-
-                if (currentPage > 5) {
-                    console.log('⚠️ Достигнут лимит в 5 страниц, завершаем сбор');
-                    break;
-                }
-            }
-
-            console.log('\n' + '='.repeat(60));
-            console.log('📊 СБОР ДАННЫХ ЗАВЕРШЕН');
-            console.log('='.repeat(60));
-            console.log(`📄 Всего страниц: ${currentPage}`);
-            console.log(`🏢 Всего организаций: ${allOrganizations.length}`);
-            console.log(`⏱️ Время сбора: ${new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()}`);
-
-            return {
-                success: true,
-                organizations: allOrganizations
-            };
-
-        } catch (error) {
-            console.log(`❌ Критическая ошибка при сборе данных из 2GIS: ${error.message}`);
-
-            return {
-                success: false,
-                error: error.message,
-                organizations: allOrganizations
-            };
-        }
+            },
+            this.retryConfig.gisCollection
+        );
     }
 
     async goToNextPage2GIS(currentPage) {
-        try {
-            console.log(`   🔄 Пытаемся перейти на страницу ${currentPage + 1}...`);
+        return await this.executeWithRetry(
+            `Переход на следующую страницу 2GIS (${currentPage + 1})`,
+            async () => {
+                try {
+                    console.log(`   🔄 Пытаемся перейти на страницу ${currentPage + 1}...`);
 
-            const paginationSelector = 'div._1x4k6z7';
-            const pagination = await this.page.$(paginationSelector);
+                    const paginationSelector = 'div._1x4k6z7';
+                    const pagination = await this.page.$(paginationSelector);
 
-            if (!pagination) {
-                console.log('   ℹ️ Блок пагинации не найден (возможно, это последняя страница)');
-                return false;
-            }
+                    if (!pagination) {
+                        console.log('   ℹ️ Блок пагинации не найден (возможно, это последняя страница)');
+                        return false;
+                    }
 
-            const activePageSelector = 'div._1wkjy8d5 span._19xy60y';
-            const activePageElement = await pagination.$(activePageSelector);
-            let currentPageNumber = currentPage;
+                    const activePageSelector = 'div._1wkjy8d5 span._19xy60y';
+                    const activePageElement = await pagination.$(activePageSelector);
+                    let currentPageNumber = currentPage;
 
-            if (activePageElement) {
-                const activePageText = await this.page.evaluate(el => el.textContent?.trim(), activePageElement);
-                currentPageNumber = parseInt(activePageText) || currentPage;
-            }
+                    if (activePageElement) {
+                        const activePageText = await this.page.evaluate(el => el.textContent?.trim(), activePageElement);
+                        currentPageNumber = parseInt(activePageText) || currentPage;
+                    }
 
-            console.log(`   📍 Текущая страница в пагинации: ${currentPageNumber}`);
+                    console.log(`   📍 Текущая страница в пагинации: ${currentPageNumber}`);
 
-            const allPageLinks = await pagination.$$('a._1nk3cti0');
-            const allPageButtons = await pagination.$$('div._1wkjy8d5, a._1nk3cti0');
+                    const allPageLinks = await pagination.$$('a._1nk3cti0');
+                    const allPageButtons = await pagination.$$('div._1wkjy8d5, a._1nk3cti0');
 
-            console.log(`   🔗 Найдено ссылок на страницы: ${allPageLinks.length}`);
-            console.log(`   🔘 Всего элементов пагинации: ${allPageButtons.length}`);
+                    console.log(`   🔗 Найдено ссылок на страницы: ${allPageLinks.length}`);
+                    console.log(`   🔘 Всего элементов пагинации: ${allPageButtons.length}`);
 
-            let nextPageElement = null;
-            let nextPageNumber = currentPageNumber + 1;
+                    let nextPageElement = null;
+                    let nextPageNumber = currentPageNumber + 1;
 
-            for (const element of allPageButtons) {
-                const pageText = await this.page.evaluate(el => el.textContent?.trim(), element);
-                const pageNum = parseInt(pageText);
+                    for (const element of allPageButtons) {
+                        const pageText = await this.page.evaluate(el => el.textContent?.trim(), element);
+                        const pageNum = parseInt(pageText);
 
-                if (pageNum === nextPageNumber) {
-                    nextPageElement = element;
-                    console.log(`   ✅ Найден элемент страницы ${nextPageNumber}`);
-                    break;
+                        if (pageNum === nextPageNumber) {
+                            nextPageElement = element;
+                            console.log(`   ✅ Найден элемент страницы ${nextPageNumber}`);
+                            break;
+                        }
+                    }
+
+                    if (nextPageElement) {
+                        console.log(`   🖱️ Кликаем на элемент перехода...`);
+
+                        await this.executeWithRetry(
+                            'Прокрутка к элементу пагинации',
+                            async () => {
+                                await nextPageElement.scrollIntoView();
+                                return true;
+                            },
+                            this.retryConfig.pageNavigation
+                        );
+
+                        await this.executeWithRetry(
+                            'Клик по элементу пагинации',
+                            async () => {
+                                await nextPageElement.click();
+                                return true;
+                            },
+                            this.retryConfig.pageNavigation
+                        );
+
+                        console.log(`   ⏳ Ждем загрузки страницы ${nextPageNumber}...`);
+                        await this.delayByType('medium');
+
+                        const newUrl = this.page.url();
+                        console.log(`   ✅ Перешли на: ${newUrl}`);
+
+                        return true;
+                    } else {
+                        console.log(`   ❌ Не найдена кнопка для перехода на страницу ${nextPageNumber}`);
+                        return false;
+                    }
+
+                } catch (error) {
+                    console.log(`   ⚠️ Ошибка при переходе на следующую страницу: ${error.message}`);
+                    return false;
                 }
-            }
-
-            if (nextPageElement) {
-                console.log(`   🖱️ Кликаем на элемент перехода...`);
-
-                await nextPageElement.scrollIntoView();
-
-                await nextPageElement.click();
-
-                console.log(`   ⏳ Ждем загрузки страницы ${nextPageNumber}...`);
-
-                const newUrl = this.page.url();
-                console.log(`   ✅ Перешли на: ${newUrl}`);
-
-                return true;
-            } else {
-                console.log(`   ❌ Не найдена кнопка для перехода на страницу ${nextPageNumber}`);
-                console.log(`   ℹ️ Вероятно, страница ${currentPageNumber} - последняя`);
-                return false;
-            }
-
-        } catch (error) {
-            console.log(`   ⚠️ Ошибка при переходе на следующую страницу: ${error.message}`);
-            return false;
-        }
+            },
+            this.retryConfig.pageNavigation
+        );
     }
 
     async searchZoon() {
@@ -2179,199 +2433,281 @@ class UniversalSearchBot {
     async findAllClinicsZoon() {
         console.log(`\n🔍 Собираем ВСЕ организации из Zoon...`);
 
-        let allOrganizations = [];
-        let currentPage = 1;
-        let hasMorePages = true;
-
-        try {
-            while (hasMorePages) {
-                allOrganizations = [];
-                console.log(`\n📄 Страница ${currentPage}:`);
-                console.log('-'.repeat(30));
-
-                console.log('🔍 Ищем карточки организаций...');
+        return await this.executeWithRetry(
+            'Сбор организаций из Zoon',
+            async () => {
+                let allOrganizations = [];
+                let currentPage = 1;
+                let hasMorePages = true;
 
                 try {
-                    await this.page.waitForSelector(this.selectors.zoon.companyCards, {
-                        timeout: currentPage === 1 ? 15000 : 10000
-                    });
+                    while (hasMorePages) {
+                        allOrganizations = [];
+                        console.log(`\n📄 Страница ${currentPage}:`);
+                        console.log('-'.repeat(30));
+
+                        console.log('🔍 Ищем карточки организаций...');
+
+                        // Ожидание карточек с ретраем
+                        try {
+                            await this.executeWithRetry(
+                                `Ожидание карточек Zoon на странице ${currentPage}`,
+                                async () => {
+                                    await this.page.waitForSelector(this.selectors.zoon.companyCards, {
+                                        timeout: currentPage === 1 ? 15000 : 10000
+                                    });
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
+                        } catch (error) {
+                            console.log('⚠️ Не удалось найти карточки организаций');
+
+                            if (currentPage === 1) {
+                                console.log('🔄 Перезагружаем страницу...');
+                                await this.executeWithRetry(
+                                    'Перезагрузка страницы Zoon',
+                                    async () => {
+                                        await this.page.reload();
+                                        return true;
+                                    },
+                                    this.retryConfig.pageNavigation
+                                );
+                                continue;
+                            } else {
+                                console.log('ℹ️ Возможно, это последняя страница');
+                                break;
+                            }
+                        }
+
+                        const cards = await this.page.$$(this.selectors.zoon.companyCards);
+                        console.log(`📋 Найдено карточек: ${cards.length}`);
+
+                        if (cards.length === 0) {
+                            console.log('ℹ️ На странице нет карточек, завершаем сбор');
+                            break;
+                        }
+
+                        // Парсинг карточек с ретраем
+                        for (let i = 0; i < cards.length; i++) {
+                            try {
+                                const card = cards[i];
+
+                                const cardData = await this.executeWithRetry(
+                                    `Парсинг карточки Zoon ${i + 1}`,
+                                    async () => {
+                                        let title = '';
+                                        const titleElement = await card.$(this.selectors.zoon.companyTitle);
+                                        if (titleElement) {
+                                            title = await this.page.evaluate(el => el.textContent?.trim(), titleElement);
+                                        }
+
+                                        let address = '';
+                                        const addressElement = await card.$(this.selectors.zoon.companyAddress);
+                                        if (addressElement) {
+                                            address = await this.page.evaluate(el => el.textContent?.trim(), addressElement);
+                                        }
+
+                                        return { title, address };
+                                    },
+                                    { maxAttempts: 2, baseDelay: 1000, maxDelay: 5000 }
+                                );
+
+                                const organization = {
+                                    title: cardData.title || 'Не указано',
+                                    address: cardData.address || 'Не указан',
+                                };
+
+                                allOrganizations.push(organization);
+
+                                console.log(`   ${i + 1}. ${organization.title}`);
+                                if (cardData.address) console.log(`      📍 ${organization.address}`);
+
+                            } catch (error) {
+                                console.log(`   ⚠️ Ошибка при парсинге карточки ${i + 1}: ${error.message}`);
+
+                                allOrganizations.push({
+                                    title: 'Ошибка парсинга',
+                                    address: 'Не удалось распарсить',
+                                    error: error.message,
+                                });
+                            }
+                        }
+
+                        console.log(`✅ Страница ${currentPage} обработана: ${cards.length} организаций`);
+
+                        console.log('🔍 Проверяем наличие кнопки "Показать еще"...');
+
+                        // Переход на следующую страницу с ретраем
+                        const nextPageResult = await this.executeWithRetry(
+                            `Переход на следующую страницу Zoon`,
+                            async () => await this.goToNextPageZoon(currentPage),
+                            this.retryConfig.pageNavigation
+                        );
+
+                        hasMorePages = nextPageResult;
+
+                        if (hasMorePages) {
+                            currentPage++;
+                        } else {
+                            console.log(`🏁 Все страницы обработаны. Всего страниц: ${currentPage}`);
+                        }
+
+                        if (currentPage > 5) {
+                            console.log('⚠️ Достигнут лимит в 5 страниц, завершаем сбор');
+                            break;
+                        }
+                    }
+
+                    console.log('\n' + '='.repeat(60));
+                    console.log('📊 СБОР ДАННЫХ ZOON ЗАВЕРШЕН');
+                    console.log('='.repeat(60));
+                    console.log(`📄 Всего страниц: ${currentPage}`);
+                    console.log(`🏢 Всего организаций: ${allOrganizations.length}`);
+
+                    return {
+                        success: true,
+                        organizations: allOrganizations,
+                        totalPages: currentPage,
+                        totalOrganizations: allOrganizations.length
+                    };
+
                 } catch (error) {
-                    console.log('⚠️ Не удалось найти карточки организаций');
+                    console.log(`❌ Критическая ошибка при сборе данных из Zoon: ${error.message}`);
 
-                    if (currentPage === 1) {
-                        console.log('🔄 Перезагружаем страницу...');
-                        await this.page.reload();
-                        continue;
-                    } else {
-                        console.log('ℹ️ Возможно, это последняя страница');
-                        break;
-                    }
+                    return {
+                        success: false,
+                        error: error.message,
+                        organizations: allOrganizations,
+                        totalPages: currentPage - 1,
+                        totalOrganizations: allOrganizations.length
+                    };
                 }
-
-                const cards = await this.page.$$(this.selectors.zoon.companyCards);
-                console.log(`📋 Найдено карточек: ${cards.length}`);
-
-                if (cards.length === 0) {
-                    console.log('ℹ️ На странице нет карточек, завершаем сбор');
-                    break;
-                }
-
-                for (let i = 0; i < cards.length; i++) {
-                    try {
-                        const card = cards[i];
-
-                        let title = '';
-                        const titleElement = await card.$(this.selectors.zoon.companyTitle);
-                        if (titleElement) {
-                            title = await this.page.evaluate(el => el.textContent?.trim(), titleElement);
-                        }
-
-                        let address = '';
-                        const addressElement = await card.$(this.selectors.zoon.companyAddress);
-                        if (addressElement) {
-                            address = await this.page.evaluate(el => el.textContent?.trim(), addressElement);
-                        }
-
-                        const organization = {
-                            title: title || 'Не указано',
-                            address: address || 'Не указан',
-                        };
-
-                        allOrganizations.push(organization);
-
-                        console.log(`   ${organization.position}. ${organization.title}`);
-                        if (address) console.log(`      📍 ${organization.address}`);
-
-                    } catch (error) {
-                        console.log(`   ⚠️ Ошибка при парсинге карточки ${i + 1}: ${error.message}`);
-
-                        allOrganizations.push({
-                            title: 'Ошибка парсинга',
-                            address: 'Не удалось распарсить',
-                            error: error.message,
-                        });
-                    }
-                }
-
-                console.log(`✅ Страница ${currentPage} обработана: ${cards.length} организаций`);
-
-                console.log('🔍 Проверяем наличие кнопки "Показать еще"...');
-                hasMorePages = await this.goToNextPageZoon(currentPage);
-
-                if (hasMorePages) {
-                    currentPage++;
-                } else {
-                    console.log(`🏁 Все страницы обработаны. Всего страниц: ${currentPage}`);
-                }
-
-                if (currentPage > 5) {
-                    console.log('⚠️ Достигнут лимит в 5 страниц, завершаем сбор');
-                    break;
-                }
-            }
-
-            console.log('\n' + '='.repeat(60));
-            console.log('📊 СБОР ДАННЫХ ZOON ЗАВЕРШЕН');
-            console.log('='.repeat(60));
-            console.log(`📄 Всего страниц: ${currentPage}`);
-            console.log(`🏢 Всего организаций: ${allOrganizations.length}`);
-            console.log(`⏱️ Время сбора: ${new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()}`);
-
-            return {
-                success: true,
-                organizations: allOrganizations
-            };
-
-        } catch (error) {
-            console.log(`❌ Критическая ошибка при сборе данных из Zoon: ${error.message}`);
-
-            return {
-                success: false,
-                error: error.message,
-                organizations: allOrganizations
-            };
-        }
+            },
+            this.retryConfig.zoonCollection
+        );
     }
 
     async findTargetClinicZoon() {
         console.log(`\n🔍 Собираем ВСЕ организации с страницы результатов Zoon...`);
-        return await this.findAllClinicsZoon();
+
+        return await this.executeWithRetry(
+            'Сбор данных с страницы Zoon',
+            async () => await this.findAllClinicsZoon(),
+            this.retryConfig.zoonCollection
+        );
     }
 
     async goToNextPageZoon(currentPage) {
-        try {
-            console.log(`   🔄 Пытаемся перейти на страницу ${currentPage + 1}...`);
+        return await this.executeWithRetry(
+            `Переход на следующую страницу Zoon (${currentPage + 1})`,
+            async () => {
+                try {
+                    console.log(`   🔄 Пытаемся перейти на страницу ${currentPage + 1}...`);
 
-            const showMoreButton = await this.page.$(this.selectors.zoon.showMoreButton);
-            const nextPageLink = await this.page.$(this.selectors.zoon.showMore);
+                    const showMoreButton = await this.page.$(this.selectors.zoon.showMoreButton);
+                    const nextPageLink = await this.page.$(this.selectors.zoon.showMore);
 
-            if (showMoreButton) {
-                console.log('   ✅ Найдена кнопка "Показать еще"...');
+                    if (showMoreButton) {
+                        console.log('   ✅ Найдена кнопка "Показать еще"...');
 
-                await showMoreButton.scrollIntoView();
+                        await this.executeWithRetry(
+                            'Прокрутка к кнопке Zoon',
+                            async () => {
+                                await showMoreButton.scrollIntoView();
+                                return true;
+                            },
+                            this.retryConfig.pageNavigation
+                        );
 
-                const currentUrl = this.page.url();
-                console.log(`   📍 Текущий URL: ${currentUrl.substring(0, 100)}...`);
+                        const currentUrl = this.page.url();
+                        console.log(`   📍 Текущий URL: ${currentUrl.substring(0, 100)}...`);
 
-                await showMoreButton.click();
+                        await this.executeWithRetry(
+                            'Клик по кнопке Zoon',
+                            async () => {
+                                await showMoreButton.click();
+                                return true;
+                            },
+                            this.retryConfig.pageNavigation
+                        );
 
-                console.log(`   ⏳ Ждем загрузки следующей страницы...`);
+                        console.log(`   ⏳ Ждем загрузки следующей страницы...`);
+                        await this.delayByType('medium');
 
-                const newUrl = this.page.url();
-                console.log(`   ✅ Перешли на: ${newUrl.substring(0, 100)}...`);
+                        const newUrl = this.page.url();
+                        console.log(`   ✅ Перешли на: ${newUrl.substring(0, 100)}...`);
 
-                return true;
-            } else if (nextPageLink) {
-                console.log('   ✅ Найдена ссылка на следующую страницу...');
+                        return true;
+                    } else if (nextPageLink) {
+                        console.log('   ✅ Найдена ссылка на следующую страницу...');
 
-                await nextPageLink.scrollIntoView();
+                        await this.executeWithRetry(
+                            'Прокрутка к ссылке Zoon',
+                            async () => {
+                                await nextPageLink.scrollIntoView();
+                                return true;
+                            },
+                            this.retryConfig.pageNavigation
+                        );
 
-                const href = await this.page.evaluate(el => el.getAttribute('href'), nextPageLink);
-                if (href) {
-                    const currentUrl = this.page.url();
-                    console.log(`   📍 Текущий URL: ${currentUrl.substring(0, 100)}...`);
+                        const href = await this.page.evaluate(el => el.getAttribute('href'), nextPageLink);
+                        if (href) {
+                            await this.executeWithRetry(
+                                'Клик по ссылке Zoon',
+                                async () => {
+                                    await nextPageLink.click();
+                                    return true;
+                                },
+                                this.retryConfig.pageNavigation
+                            );
 
-                    await nextPageLink.click();
-
-                    console.log(`   ⏳ Ждем загрузки следующей страницы...`);
-
-                    const newUrl = this.page.url();
-                    console.log(`   ✅ Перешли на: ${newUrl.substring(0, 100)}...`);
-
-                    return true;
-                }
-            } else {
-                console.log('   ℹ️ Кнопка "Показать еще" или ссылка на следующую страницу не найдена');
-                console.log('   ℹ️ Вероятно, страница последняя');
-
-                const pagingContainer = await this.page.$(this.selectors.zoon.showMoreContainer);
-                if (pagingContainer) {
-                    const nextPageElements = await pagingContainer.$$('a[href*="page-"]');
-                    for (const element of nextPageElements) {
-                        const pageText = await this.page.evaluate(el => el.textContent?.trim(), element);
-                        const pageNum = parseInt(pageText);
-                        if (pageNum === currentPage + 1) {
-                            console.log(`   ✅ Найдена ссылка на страницу ${pageNum}`);
-
-                            await element.scrollIntoView();
-
-                            await element.click();
-                            console.log(`   ⏳ Ждем загрузки страницы ${pageNum}...`);
+                            console.log(`   ⏳ Ждем загрузки следующей страницы...`);
+                            await this.delayByType('medium');
 
                             return true;
                         }
+                    } else {
+                        console.log('   ℹ️ Кнопка "Показать еще" или ссылка не найдена');
+
+                        const pagingContainer = await this.page.$(this.selectors.zoon.showMoreContainer);
+                        if (pagingContainer) {
+                            const nextPageElements = await pagingContainer.$$('a[href*="page-"]');
+                            for (const element of nextPageElements) {
+                                const pageText = await this.page.evaluate(el => el.textContent?.trim(), element);
+                                const pageNum = parseInt(pageText);
+                                if (pageNum === currentPage + 1) {
+                                    console.log(`   ✅ Найдена ссылка на страницу ${pageNum}`);
+
+                                    await this.executeWithRetry(
+                                        'Клик по ссылке пагинации Zoon',
+                                        async () => {
+                                            await element.click();
+                                            return true;
+                                        },
+                                        this.retryConfig.pageNavigation
+                                    );
+
+                                    console.log(`   ⏳ Ждем загрузки страницы ${pageNum}...`);
+                                    await this.delayByType('medium');
+
+                                    return true;
+                                }
+                            }
+                        }
+
+                        return false;
                     }
+
+                    return false;
+
+                } catch (error) {
+                    console.log(`   ⚠️ Ошибка при переходе на следующую страницу: ${error.message}`);
+                    return false;
                 }
-
-                return false;
-            }
-
-            return false;
-
-        } catch (error) {
-            console.log(`   ⚠️ Ошибка при переходе на следующую страницу: ${error.message}`);
-            return false;
-        }
+            },
+            this.retryConfig.pageNavigation
+        );
     }
 
     async run() {
@@ -2565,22 +2901,22 @@ class UniversalSearchBot {
 
 const targetQuery = {
     yandexTarget: {
-        query: 'вывод из запоя',
+        query: 'вызов психиатра нарколога на дом',
         city: 'ростов на дону',
         regionId: 39
     },
     googleTarget: {
-        query: 'вывод из запоя',
+        query: 'вызов психиатра нарколога на дом',
         city: 'ростов на дону',
         regionId: 1012013
     },
     gisTarget: {
         url: 'https://2gis.ru/rostov/',
-        query: 'вывод из запоя',
+        query: 'вызов психиатра нарколога на дом',
     },
     zoonTarget: {
         url: 'https://zoon.ru/rostov/',
-        query: 'вывод из запоя',
+        query: 'вызов психиатра нарколога на дом',
     },
 };
 
