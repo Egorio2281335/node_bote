@@ -148,7 +148,7 @@ class UniversalSearchBot {
         this.browser = await puppeteer.launch({
             headless: false,
             userDataDir: this.profilePath,
-            defaultViewport: this.viewport,
+            //defaultViewport: this.viewport,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -1011,8 +1011,8 @@ class UniversalSearchBot {
                 console.log('✅ Целевой поиск в Яндекс выполнен\n');
 
                 console.log('🔍 Ищем клинику в Яндекс...');
-                /*const resultCard = await this.findTargetCardYandex();
-                this.results.card = resultCard;*/
+                const resultCard = await this.findTargetCardYandex();
+                this.results.card = resultCard;
 
                 if (await this.checkForCaptcha('yandex')) {
                     console.log(`🚫 Капча при загрузке 'yandex'`);
@@ -1285,7 +1285,7 @@ class UniversalSearchBot {
             }
 
             // Пытаемся нажать кнопку "Показать ещё" несколько раз
-            let maxShowMoreClicks = 50;
+            let maxShowMoreClicks = 4;
             let clicksCount = 0;
 
             while (showMoreElement && clicksCount < maxShowMoreClicks && !searchCompleted) {
